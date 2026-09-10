@@ -1,0 +1,3 @@
+# Variantes publicadas separadamente no bucket corporativo.
+# Mantém o ambiente Docker local sem depender do provider Kubernetes do cluster.
+cluster/

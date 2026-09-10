@@ -1,0 +1,8 @@
+# O Airflow oficial já fornece requests/python-dotenv em versões compatíveis.
+# Não fixe aqui dependências transitivas que possam invalidar as constraints da imagem.
+PyPDF2==3.0.1
+zeep==4.3.1
+openpyxl==3.1.5
+pyotp==2.9.0
+selenium==4.28.0
+fsspec==2026.7.0

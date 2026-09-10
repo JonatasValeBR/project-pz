@@ -1,0 +1,4 @@
+-r requirements.txt
+
+# Backend gs:// usado quando o bucket corporativo for disponibilizado.
+gcsfs==2026.7.0

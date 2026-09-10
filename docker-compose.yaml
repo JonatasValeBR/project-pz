@@ -1,0 +1,235 @@
+# Derivado do quick-start oficial do Apache Airflow 3.3.0.
+# Exclusivo para desenvolvimento local; não usar em produção.
+# Mantido para que a migração de diretório reutilize containers e o volume do
+# metastore existentes. O projeto pode ser renomeado em uma migração de estado
+# planejada quando o Docker estiver disponível.
+name: pgfn-airflow
+
+x-airflow-common: &airflow-common
+  image: pgfn-airflow:3.3.0
+  environment: &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+    AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CELERY__BROKER_URL: redis://:@redis:6379/0
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-dHJmMy1haXJmbG93LWxvY2FsLWRldi1rZXktMDAwMDE=}
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-apiserver:8080/execution/
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET:-pgfn-airflow-local-jwt-only}
+    AIRFLOW__API_AUTH__JWT_ISSUER: pgfn-airflow-local
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: "true"
+    AIRFLOW__CORE__MAX_MAP_LENGTH: "5000"
+    AIRFLOW_CONFIG: /opt/airflow/config/airflow.cfg
+    PYTHONPATH: /opt/airflow/project
+    PGFN_ARTIFACT_STORE_URI: ${PGFN_ARTIFACT_STORE_URI:-file:///opt/airflow/data}
+    TRF1_SCREENSHOT_DIR: /opt/airflow/data/trf1_process_list/screenshots
+  volumes:
+    - ./dags:/opt/airflow/dags:ro
+    - ./logs:/opt/airflow/logs
+    - ./config:/opt/airflow/config
+    - ./plugins:/opt/airflow/plugins
+    - ./data:/opt/airflow/data
+    - ./src:/opt/airflow/project/src:ro
+    - ./tests:/opt/airflow/project/tests:ro
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on: &airflow-common-depends-on
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.2-bookworm
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 30s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+
+  airflow-apiserver:
+    <<: *airflow-common
+    command: api-server
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/api/v2/monitor/health"]
+      interval: 20s
+      timeout: 10s
+      retries: 10
+      start_period: 40s
+    restart: unless-stopped
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type SchedulerJob --hostname "$${HOSTNAME}"']
+      interval: 20s
+      timeout: 10s
+      retries: 10
+      start_period: 40s
+    restart: unless-stopped
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-dag-processor:
+    <<: *airflow-common
+    command: dag-processor
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type DagProcessorJob --hostname "$${HOSTNAME}"']
+      interval: 20s
+      timeout: 10s
+      retries: 10
+      start_period: 40s
+    restart: unless-stopped
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-worker:
+    <<: *airflow-common
+    command: celery worker
+    environment:
+      <<: *airflow-common-env
+      DUMB_INIT_SETSID: "0"
+    healthcheck:
+      test: ["CMD-SHELL", 'celery --app airflow.providers.celery.executors.celery_executor.app inspect ping -d "celery@$${HOSTNAME}"']
+      interval: 20s
+      timeout: 10s
+      retries: 10
+      start_period: 40s
+    restart: unless-stopped
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-apiserver:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-triggerer:
+    <<: *airflow-common
+    command: triggerer
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type TriggererJob --hostname "$${HOSTNAME}"']
+      interval: 20s
+      timeout: 10s
+      retries: 10
+      start_period: 40s
+    restart: unless-stopped
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-init:
+    <<: *airflow-common
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        AIRFLOW_VERSION: "3.3.0"
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        set -euo pipefail
+        mkdir -p /opt/airflow/{logs,dags,plugins,config} \
+          /opt/airflow/data/trf3_mni_initial_petitions/{pdfs,relatorios,manifests} \
+          /opt/airflow/data/trf1_process_list/{relatorios,screenshots}
+        /entrypoint airflow version
+        /entrypoint airflow config list >/dev/null
+        python /opt/airflow/bootstrap/init_connections.py
+        /entrypoint airflow connections import --overwrite /tmp/pgfn-connections.json
+        /entrypoint airflow pools set mni_pool 4 "Limite local de concorrência MNI"
+        /entrypoint airflow pools set trf1_pje_pool 1 "Um navegador TRF1 por vez"
+    environment:
+      <<: *airflow-common-env
+      _AIRFLOW_DB_MIGRATE: "true"
+      _AIRFLOW_WWW_USER_CREATE: "true"
+      _AIRFLOW_WWW_USER_USERNAME: ${AIRFLOW_ADMIN_USER:-airflow}
+      _AIRFLOW_WWW_USER_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD:-airflow}
+      TRF3_REPORT_TOKEN: ${TOKEN:?TOKEN ausente no arquivo de ambiente}
+      TRF3_REPORT_URL: ${REPORT_URL:-https://relatorios-gerenciais-1g.app.trf3.jus.br/Api/DownloadJSON}
+      TRF3_REPORT_ID: ${REPORT_ID:-421}
+      TRF3_HTTP_TIMEOUT_SECONDS: ${HTTP_TIMEOUT_SECONDS:-30}
+      TRF3_MNI_WSDL: ${ENDPOINT_TRF3:?ENDPOINT_TRF3 ausente no arquivo de ambiente}
+      TRF3_MNI_LOGIN: ${TRF3_LOGIN:?TRF3_LOGIN ausente no arquivo de ambiente}
+      TRF3_MNI_PASSWORD: ${TRF3_SENHA:?TRF3_SENHA ausente no arquivo de ambiente}
+      TRF3_ACCESS_LINK: ${LINK_ACESSO_TRF3:?LINK_ACESSO_TRF3 ausente no arquivo de ambiente}
+      TRF3_SOAP_WSDL_TIMEOUT_SECONDS: ${SOAP_WSDL_TIMEOUT_SECONDS:-30}
+      TRF3_SOAP_OPERATION_TIMEOUT_SECONDS: ${SOAP_OPERATION_TIMEOUT_SECONDS:-60}
+      TRF3_RETRY_ATTEMPTS: ${RETRY_ATTEMPTS:-3}
+      TRF3_RETRY_BACKOFF_SECONDS: ${RETRY_BACKOFF_SECONDS:-2}
+      TRF3_INITIAL_DOCUMENT_POLICY: ${INITIAL_DOCUMENT_POLICY:-error}
+      TRF1_ENDPOINT: ${ENDPOINT_TRF1:?ENDPOINT_TRF1 ausente no arquivo de ambiente}
+      TRF1_LOGIN: ${TRF1_LOGIN:?TRF1_LOGIN ausente no arquivo de ambiente}
+      TRF1_PASSWORD: ${TRF1_SENHA:?TRF1_SENHA ausente no arquivo de ambiente}
+      TRF1_TOTP_SECRET: ${TRF1_TOTP_SECRET:?TRF1_TOTP_SECRET ausente no arquivo de ambiente}
+      TRF1_REPORTS_URL: ${TRF1_REPORTS_URL:-https://pje1g.trf1.jus.br/pje/Processo/ConsultaProcesso/listView.seam}
+      TRF1_TIMEOUT_SECONDS: ${TRF1_TIMEOUT_SECONDS:-60}
+      TRF1_HEADLESS: ${TRF1_HEADLESS:-true}
+      INTEGRA_AMBIENTE: ${INTEGRA_AMBIENTE:-hom}
+      INTEGRA_CLIENT_ID: ${INTEGRA_CLIENT_ID:-}
+      INTEGRA_CLIENT_SECRET: ${INTEGRA_CLIENT_SECRET:-}
+      INTEGRA_KC_BASE_URL: ${INTEGRA_KC_BASE_URL:-}
+      INTEGRA_SERVICE_BASE_URL: ${INTEGRA_SERVICE_BASE_URL:-}
+      INTEGRA_KC_REALM: ${INTEGRA_KC_REALM:-integra-realm}
+      INTEGRA_JSON_PATH: ${INTEGRA_JSON_PATH:-data/integra_service/processos.json}
+      INTEGRA_DOWNLOADS_DIR: ${INTEGRA_DOWNLOADS_DIR:-}
+      INTEGRA_RUNS_DIR: ${INTEGRA_RUNS_DIR:-}
+      INTEGRA_TIPO_DOCUMENTO_ALVO: ${INTEGRA_TIPO_DOCUMENTO_ALVO:-PETIÇÃO INICIAL}
+      INTEGRA_POLLING_INTERVAL: ${INTEGRA_POLLING_INTERVAL:-20}
+      INTEGRA_POLLING_TIMEOUT: ${INTEGRA_POLLING_TIMEOUT:-900}
+      INTEGRA_TIMEOUT_PADRAO: ${INTEGRA_TIMEOUT_PADRAO:-60}
+      INTEGRA_TIMEOUT_CEPH: ${INTEGRA_TIMEOUT_CEPH:-180}
+      INTEGRA_MAX_WORKERS: ${INTEGRA_MAX_WORKERS:-4}
+      INTEGRA_LOG_LEVEL: ${INTEGRA_LOG_LEVEL:-INFO}
+      INTEGRA_LOG_STDOUT: ${INTEGRA_LOG_STDOUT:-true}
+    volumes:
+      - ./scripts:/opt/airflow/bootstrap:ro
+      - ./dags:/opt/airflow/dags:ro
+      - ./logs:/opt/airflow/logs
+      - ./config:/opt/airflow/config
+      - ./plugins:/opt/airflow/plugins
+      - ./data:/opt/airflow/data
+      - ./src:/opt/airflow/project/src:ro
+      - ./tests:/opt/airflow/project/tests:ro
+    user: "0:0"
+
+  airflow-cli:
+    <<: *airflow-common
+    profiles: [debug]
+    command: ["bash", "-c", "airflow"]
+    depends_on:
+      <<: *airflow-common-depends-on
+
+volumes:
+  postgres-db-volume:
